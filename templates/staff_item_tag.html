@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block title %}Item tag {{ tag }}{% endblock %}
+
+{% block head %}
+<style>@media print { header, footer, .no-print { display: none !important; } }</style>
+{% endblock %}
+
+{% block content %}
+<div class="max-w-[600px] mx-auto space-y-6">
+    <div class="card-professional p-6 text-center space-y-3" id="tag-label">
+        <p class="text-xs font-bold uppercase tracking-widest text-slate-500">TNSTC Lost &amp; Found · {{ item.depot_name }}</p>
+        <div class="mx-auto w-[200px] h-[200px] [&>svg]:w-full [&>svg]:h-full">{{ qr_svg | safe }}</div>
+        <p class="text-2xl font-bold mono tracking-widest">{{ tag }}</p>
+        <p class="text-xs text-slate-500">Logged {{ item.date }} · stick this tag on the item</p>
+    </div>
+    <div class="flex justify-center no-print">
+        <button onclick="window.print()" class="btn-gov-primary text-xs uppercase tracking-widest">Print tag</button>
+    </div>
+
+    <div class="card-professional p-6 no-print">
+        <h2 class="font-heading font-bold text-slate-800 uppercase mb-3">Custody log</h2>
+        <ul class="space-y-2 text-sm">
+            {% for e in custody %}
+            <li class="flex justify-between gap-4 border-b border-slate-100 pb-2">
+                <span class="font-bold uppercase">{{ e.event }}</span>
+                <span class="text-slate-600">{{ e.depotName or e.depotId }}{% if e.recipientName %} → {{ e.recipientName }}{% endif %}{% if e.staffName %} · by {{ e.staffName }}{% endif %}</span>
+                <span class="mono text-xs text-slate-500">{{ e.at | ist }}</span>
+            </li>
+            {% else %}
+            <li class="text-slate-500">No entries.</li>
+            {% endfor %}
+        </ul>
+    </div>
+</div>
+{% endblock %}

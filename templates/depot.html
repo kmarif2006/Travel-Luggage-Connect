@@ -84,11 +84,56 @@
                     </div>
 
                     <div class="space-y-1.5">
-                        <label class="block text-sm font-bold text-slate-700">Description / விவரம்</label>
+                        <label class="block text-sm font-bold text-slate-700">
+                            Public description / பொது விவரம் <span class="text-tn-red">*</span>
+                        </label>
+                        <input type="text" name="public_description" required maxlength="80"
+                               class="w-full h-[40px] px-3 border border-slate-300 rounded-md font-medium input-focus"
+                               placeholder="Short, generic: e.g. Black backpack">
+                        <p class="text-[11px] text-slate-500">Sent to matched passengers. Never include contents, serial numbers, names or ID numbers.</p>
+                    </div>
+
+                    <div class="space-y-1.5">
+                        <label class="block text-sm font-bold text-slate-700">Private notes (staff only) / விவரம்</label>
                         <textarea name="notes" required rows="2"
                                   class="w-full p-3 border border-slate-300 rounded-md font-medium input-focus resize-none"
-                                  placeholder="Describe the found item (e.g. Blue handbag with laptop inside)"></textarea>
+                                  placeholder="Full details used for matching (e.g. Blue handbag with laptop inside). Never shown to passengers."></textarea>
                     </div>
+
+                    {% if claim_catalogue is defined %}
+                    <!-- Feature 3: secret ownership questions. Hashed on save; nobody can read them back. -->
+                    <fieldset class="space-y-3 p-4 rounded-md border border-amber-200 bg-amber-50/50" id="private-attrs">
+                        <legend class="px-1 text-sm font-bold text-slate-700">Ownership check details (secret)</legend>
+                        <p class="text-[11px] text-slate-600">Only the real owner should know these. Fill at least two. They are hashed when you save and are never shown again, to anyone.</p>
+                        <div class="space-y-1.5">
+                            <label for="category" class="block text-xs font-bold text-slate-700">Item category</label>
+                            <select name="category" id="category" class="w-full h-[40px] px-3 border border-slate-300 rounded-md bg-white input-focus">
+                                {% for c in claim_catalogue.categories %}<option value="{{ c }}">{{ c | capitalize }}</option>{% endfor %}
+                            </select>
+                        </div>
+                        <div class="grid md:grid-cols-2 gap-3">
+                            {% for name, attr in claim_catalogue.attributes.items() %}
+                            <div class="space-y-1 attr-field" data-categories="{{ attr.categories | join(' ') }}">
+                                <label for="attr_{{ name }}" class="block text-xs font-bold text-slate-700">{{ attr.label }}</label>
+                                <input type="text" name="attr_{{ name }}" id="attr_{{ name }}" maxlength="80" autocomplete="off"
+                                       class="w-full h-[36px] px-3 border border-slate-300 rounded-md text-sm input-focus">
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </fieldset>
+                    <script>
+                    (() => {
+                        const select = document.getElementById('category');
+                        const sync = () => document.querySelectorAll('#private-attrs .attr-field').forEach(el => {
+                            const show = el.dataset.categories.split(' ').includes(select.value);
+                            el.classList.toggle('hidden', !show);
+                            if (!show) el.querySelector('input').value = '';
+                        });
+                        select.addEventListener('change', sync);
+                        sync();
+                    })();
+                    </script>
+                    {% endif %}
 
                     <!-- Image Upload Zone -->
                     <div class="space-y-2">
@@ -147,6 +192,10 @@
                         <div class="flex-grow min-w-0">
                             <div class="flex items-center justify-between mb-0.5">
                                 <span class="text-[10px] font-bold text-tn-blue uppercase tracking-wide">ID: {{ report.id }}</span>
+                                {% if report.qrTagId %}
+                                <a href="{{ url_for('claims.item_tag', found_id=report.found_id) }}" target="_blank"
+                                   class="text-[10px] font-bold text-slate-600 mono hover:text-tn-blue underline">{{ report.qrTagId }} · print tag</a>
+                                {% endif %}
                                 <span class="text-[9px] text-slate-400 font-bold uppercase">{{ report.date }}</span>
                             </div>
                             <p class="text-xs font-bold text-slate-700 truncate">{{ report.route_name }}</p>
@@ -208,6 +257,9 @@
                                                 {{ lost.tracking_id or lost.id }}
                                             </span>
                                             <h4 class="text-sm font-bold text-slate-800">{{ lost.name }}</h4>
+                                            {% if lost.match_status %}
+                                            <span class="text-[10px] font-bold uppercase px-2 py-0.5 rounded border border-slate-200 bg-white text-slate-600">{{ lost.match_status | replace('_', ' ') }}</span>
+                                            {% endif %}
                                         </div>
                                         <p class="text-xs text-tn-blue font-bold mono">{{ lost.phone }}</p>
                                         <p class="text-[10px] text-slate-500 mt-1 line-clamp-2">
@@ -344,7 +396,7 @@ fRouteSearch.addEventListener('input', function () {
     const q = this.value.trim();
     clearTimeout(_fTimer);
     _fTimer = setTimeout(() => {
-        fetch(`/api/transport/routes?q=${encodeURIComponent(q)}&limit=25`)
+        fetch(`/api/transport/routes?q=${encodeURIComponent(q)}&limit=25&depot_only=1`)
             .then(r => r.json())
             .then(routes => {
                 fRouteResults.innerHTML = '';

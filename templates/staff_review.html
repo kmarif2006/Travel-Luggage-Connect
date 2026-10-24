@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+
+{% block title %}Match Review - {{ depot.name }}{% endblock %}
+
+{% block content %}
+<div class="space-y-8">
+    <div class="flex items-center justify-between flex-wrap gap-4">
+        <div>
+            <h1 class="text-2xl font-heading font-bold text-slate-800 uppercase tracking-wide">Match Review</h1>
+            <p class="text-sm text-slate-500">{{ depot.name }} · medium-confidence matches wait here until you approve them. Nothing is sent to the passenger before approval.</p>
+        </div>
+        <button id="rerun-btn" type="button" class="btn-gov-secondary text-xs uppercase tracking-widest">Re-run matcher for my open items</button>
+    </div>
+    <div id="flash" role="status" class="hidden p-3 rounded-md text-sm font-semibold"></div>
+
+    <section class="card-professional overflow-hidden">
+        <div class="p-4 border-b border-slate-100 flex items-center justify-between">
+            <h2 class="font-heading font-bold text-slate-800 uppercase">Review queue</h2>
+            <span id="queue-count" class="text-xs font-bold text-slate-500"></span>
+        </div>
+        <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+                <thead class="bg-slate-50 text-[10px] uppercase tracking-wider text-slate-500">
+                    <tr><th class="p-3 text-left">Report</th><th class="p-3 text-left">Passenger's description</th>
+                        <th class="p-3 text-left">Found item (public / private notes)</th><th class="p-3 text-left">Confidence</th><th class="p-3"></th></tr>
+                </thead>
+                <tbody id="queue-body"></tbody>
+            </table>
+        </div>
+        <p id="queue-empty" class="hidden p-6 text-sm text-slate-500">No matches awaiting review.</p>
+    </section>
+
+    <section class="card-professional overflow-hidden">
+        <div class="p-4 border-b border-slate-100 flex items-center justify-between gap-4 flex-wrap">
+            <h2 class="font-heading font-bold text-slate-800 uppercase">Notification delivery</h2>
+            <select id="notif-filter" class="h-9 px-2 border border-slate-300 rounded-md text-sm">
+                <option value="">All</option>
+                <option value="failed" selected>Failed</option>
+                <option value="pending">Pending</option>
+                <option value="sent">Sent</option>
+                <option value="cancelled">Cancelled</option>
+            </select>
+        </div>
+        <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+                <thead class="bg-slate-50 text-[10px] uppercase tracking-wider text-slate-500">
+                    <tr><th class="p-3 text-left">Report</th><th class="p-3 text-left">Channel</th><th class="p-3 text-left">To</th>
+                        <th class="p-3 text-left">Status</th><th class="p-3 text-left">Attempts</th><th class="p-3 text-left">Last error</th><th class="p-3"></th></tr>
+                </thead>
+                <tbody id="notif-body"></tbody>
+            </table>
+        </div>
+        <p id="notif-empty" class="hidden p-6 text-sm text-slate-500">Nothing to show.</p>
+    </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(() => {
+    const CSRF = document.querySelector('meta[name="csrf-token"]').content;
+    const $ = id => document.getElementById(id);
+
+    // Every value from the API is untrusted text: build DOM nodes, never innerHTML.
+    function cell(text, cls) {
+        const td = document.createElement('td');
+        td.className = 'p-3 align-top ' + (cls || '');
+        td.textContent = text == null ? '—' : String(text);
+        return td;
+    }
+    function flash(msg, ok) {
+        const el = $('flash');
+        el.textContent = msg;
+        el.className = 'p-3 rounded-md text-sm font-semibold ' +
+            (ok ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-tn-red border border-red-200');
+    }
+    async function call(method, url, body) {
+        const resp = await fetch(url, { method, credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF },
+            body: body === undefined ? undefined : JSON.stringify(body) });
+        let data = {};
+        try { data = await resp.json(); } catch (e) { data = {}; }
+        if (resp.status === 401) { window.location.assign('/depot-login'); }
+        return { status: resp.status, data };
+    }
+    function button(label, cls, onClick) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = label;
+        b.className = 'h-8 px-3 rounded-md text-xs font-bold uppercase text-white ' + cls;
+        b.addEventListener('click', async () => { b.disabled = true; await onClick(); });
+        return b;
+    }
+
+    async function loadQueue() {
+        const { data } = await call('GET', '/staff/matches?status=staff_review');
+        const body = $('queue-body');
+        body.replaceChildren();
+        const rows = (data.matches || []);
+        $('queue-count').textContent = `${rows.length} awaiting review`;
+        $('queue-empty').classList.toggle('hidden', rows.length > 0);
+        for (const m of rows) {
+            const tr = document.createElement('tr');
+            tr.className = 'border-t border-slate-100';
+            tr.dataset.matchId = m.matchId;
+            tr.append(cell(m.report.trackingId, 'mono font-bold'), cell(m.report.description),
+                      cell(`${m.item.publicDescription || '—'} / ${m.item.notes || '—'}`),
+                      cell(`${Math.round((m.confidence || 0) * 100)}%`, 'font-bold'));
+            const actions = document.createElement('td');
+            actions.className = 'p-3 align-top whitespace-nowrap space-x-2';
+            actions.append(
+                button('Approve', 'bg-green-600 hover:bg-green-700', async () => {
+                    const r = await call('POST', `/staff/matches/${m.matchId}/approve`);
+                    flash(r.status === 200 ? 'Approved. The passenger is being notified.' : r.data.error.message, r.status === 200);
+                    refresh();
+                }),
+                button('Reject', 'bg-tn-red hover:bg-red-800', async () => {
+                    const r = await call('POST', `/staff/matches/${m.matchId}/reject`);
+                    flash(r.status === 200 ? 'Rejected. Nothing will be sent.' : r.data.error.message, r.status === 200);
+                    refresh();
+                }));
+            tr.append(actions);
+            body.append(tr);
+        }
+    }
+
+    async function loadNotifications() {
+        const status = $('notif-filter').value;
+        const { data } = await call('GET', '/staff/notifications' + (status ? `?status=${status}` : ''));
+        const body = $('notif-body');
+        body.replaceChildren();
+        const rows = (data.notifications || []);
+        $('notif-empty').classList.toggle('hidden', rows.length > 0);
+        for (const n of rows) {
+            const tr = document.createElement('tr');
+            tr.className = 'border-t border-slate-100';
+            tr.append(cell(n.reportId, 'mono font-bold'), cell(n.channel), cell(n.to, 'mono'),
+                      cell(n.status, n.status === 'failed' ? 'font-bold text-tn-red' : ''),
+                      cell(`${n.attempts}/${n.maxAttempts}`), cell(n.lastError, 'text-xs text-slate-500'));
+            const actions = document.createElement('td');
+            actions.className = 'p-3 align-top';
+            if (n.retryable) {
+                actions.append(button('Retry', 'bg-tn-blue hover:bg-blue-800', async () => {
+                    const r = await call('POST', `/staff/notifications/${n.id}/retry`);
+                    flash(r.status === 200 ? 'Queued for another attempt.' : r.data.error.message, r.status === 200);
+                    refresh();
+                }));
+            }
+            tr.append(actions);
+            body.append(tr);
+        }
+    }
+
+    function refresh() { loadQueue(); loadNotifications(); }
+    $('notif-filter').addEventListener('change', loadNotifications);
+    $('rerun-btn').addEventListener('click', async () => {
+        const r = await call('POST', '/staff/matcher/rerun', {});
+        flash(r.status === 200 ? `Re-scored ${r.data.itemsRescored} open item(s).` : r.data.error.message, r.status === 200);
+        refresh();
+    });
+    refresh();
+})();
+</script>
+{% endblock %}

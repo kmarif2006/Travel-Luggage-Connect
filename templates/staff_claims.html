@@ -1,0 +1,220 @@
+{% extends "base.html" %}
+
+{% block title %}Claims &amp; Pickup - {{ depot.name }}{% endblock %}
+
+{% block content %}
+<div class="space-y-8">
+    <div>
+        <h1 class="text-2xl font-heading font-bold text-slate-800 uppercase tracking-wide">Claims &amp; Pickup</h1>
+        <p class="text-sm text-slate-500">{{ depot.name }} · verify pickup codes, hand items over, and review claims that need a person.</p>
+    </div>
+
+    <!-- Scanner / verify -->
+    <section class="card-professional p-6 space-y-4">
+        <h2 class="font-heading font-bold text-slate-800 uppercase">Pickup counter</h2>
+        <div class="grid md:grid-cols-2 gap-4">
+            <div class="space-y-1.5">
+                <label for="token-input" class="block text-xs font-bold text-slate-700">1. Passenger's QR or pickup code</label>
+                <input id="token-input" autocomplete="off" spellcheck="false" placeholder="Scan the QR, or type A7X2-K9P4"
+                       class="w-full h-[44px] px-3 border border-slate-300 rounded-md mono input-focus">
+                <button id="camera-btn" type="button" class="hidden text-xs font-bold text-tn-blue uppercase hover:underline">Scan with camera</button>
+                <video id="camera" class="hidden w-full max-w-[320px] rounded-md" playsinline muted></video>
+            </div>
+            <div class="space-y-1.5">
+                <label for="tag-input" class="block text-xs font-bold text-slate-700">2. Item's QR tag</label>
+                <input id="tag-input" autocomplete="off" spellcheck="false" placeholder="Scan the tag on the item (TAG-…)"
+                       class="w-full h-[44px] px-3 border border-slate-300 rounded-md mono input-focus">
+            </div>
+        </div>
+        <button id="verify-btn" type="button" class="btn-gov-primary text-xs uppercase tracking-widest">Verify</button>
+
+        <div id="verify-result" class="hidden p-4 rounded-md border space-y-2" role="status">
+            <p id="verify-title" class="font-bold"></p>
+            <p id="verify-reason" class="text-sm"></p>
+            <dl id="verify-details" class="hidden grid grid-cols-2 gap-x-4 gap-y-1 text-sm"></dl>
+        </div>
+
+        <div id="complete-box" class="hidden space-y-3 p-4 rounded-md bg-slate-50 border border-slate-200">
+            <label class="flex items-center gap-2 text-sm font-bold text-slate-700">
+                <input id="id-checked" type="checkbox"> I checked the passenger's photo ID and it matches the name above
+            </label>
+            <input id="staff-name" maxlength="60" placeholder="Your name (for the custody log)"
+                   class="w-full md:w-1/2 h-[40px] px-3 border border-slate-300 rounded-md input-focus">
+            <button id="complete-btn" type="button" class="btn-gov-primary bg-green-700 hover:bg-green-800 text-xs uppercase tracking-widest disabled:opacity-50" disabled>Hand over item</button>
+        </div>
+    </section>
+
+    <!-- Review queue -->
+    <section class="card-professional overflow-hidden">
+        <div class="p-4 border-b border-slate-100 flex items-center justify-between">
+            <h2 class="font-heading font-bold text-slate-800 uppercase">Claims needing a person</h2>
+            <select id="claim-filter" class="h-9 px-2 border border-slate-300 rounded-md text-sm">
+                <option value="staff_review" selected>Borderline answers (review)</option>
+                <option value="locked">Locked - ID check at counter</option>
+                <option value="token_issued">Ready for pickup (reissue)</option>
+                <option value="">All</option>
+            </select>
+        </div>
+        <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+                <thead class="bg-slate-50 text-[10px] uppercase tracking-wider text-slate-500">
+                    <tr><th class="p-3 text-left">Report</th><th class="p-3 text-left">Claimer</th><th class="p-3 text-left">Item / tag</th>
+                        <th class="p-3 text-left">Answers</th><th class="p-3 text-left">Status</th><th class="p-3"></th></tr>
+                </thead>
+                <tbody id="claims-body"></tbody>
+            </table>
+        </div>
+        <p id="claims-empty" class="hidden p-6 text-sm text-slate-500">Nothing here.</p>
+    </section>
+    <div id="flash" role="status" class="hidden p-3 rounded-md text-sm font-semibold"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(() => {
+    const CSRF = document.querySelector('meta[name="csrf-token"]').content;
+    const $ = id => document.getElementById(id);
+    async function call(method, url, body) {
+        const resp = await fetch(url, { method, credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF },
+            body: body === undefined ? undefined : JSON.stringify(body) });
+        if (resp.status === 401) window.location.assign('/depot-login');
+        let data = {};
+        try { data = await resp.json(); } catch (e) { data = {}; }
+        return { status: resp.status, data };
+    }
+    function flash(msg, ok) {
+        const el = $('flash');
+        el.textContent = msg;
+        el.className = 'p-3 rounded-md text-sm font-semibold ' +
+            (ok ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-tn-red border border-red-200');
+    }
+    function showResult(ok, title, reason, details) {
+        const box = $('verify-result');
+        box.className = 'p-4 rounded-md border space-y-2 ' + (ok ? 'bg-green-50 border-green-300 text-green-900' : 'bg-red-50 border-red-300 text-red-900');
+        $('verify-title').textContent = title;
+        $('verify-reason').textContent = reason;
+        const dl = $('verify-details');
+        dl.replaceChildren();
+        for (const [k, v] of details || []) {
+            const dt = document.createElement('dt'); dt.className = 'font-bold'; dt.textContent = k;
+            const dd = document.createElement('dd'); dd.className = 'mono'; dd.textContent = v == null ? '—' : String(v);
+            dl.append(dt, dd);
+        }
+        dl.classList.toggle('hidden', !details);
+    }
+
+    $('verify-btn').addEventListener('click', async () => {
+        $('complete-box').classList.add('hidden');
+        const body = { token: $('token-input').value.trim() };
+        if ($('tag-input').value.trim()) body.qrTagId = $('tag-input').value.trim();
+        const { status, data } = await call('POST', '/pickup/verify', body);
+        if (status !== 200) { showResult(false, 'Cannot verify', (data.error && data.error.message) || 'Error'); return; }
+        if (!data.valid) { showResult(false, 'NOT VALID - do not hand over', data.message + ` (${data.reason})`); return; }
+        const c = data.claim;
+        showResult(true, 'VALID pickup code', data.message, [
+            ['Name', c.claimerName], ['Phone', c.claimerPhone], ['PNR', c.pnr], ['Report', c.reportId],
+            ['Item', c.itemDescription], ['Item tag', c.qrTagId], ['Valid until', c.tokenExpiresAt]]);
+        $('complete-box').classList.remove('hidden');
+    });
+    $('id-checked').addEventListener('change', () => { $('complete-btn').disabled = !$('id-checked').checked; });
+    $('complete-btn').addEventListener('click', async () => {
+        $('complete-btn').disabled = true;
+        const { status, data } = await call('POST', '/pickup/complete', {
+            token: $('token-input').value.trim(), qrTagId: $('tag-input').value.trim(),
+            idChecked: $('id-checked').checked, staffName: $('staff-name').value.trim() });
+        if (status === 200) {
+            showResult(true, 'HANDED OVER', `Custody log updated. Item tag ${data.qrTagId} is now handed over.`);
+            $('complete-box').classList.add('hidden');
+            $('token-input').value = ''; $('tag-input').value = ''; $('id-checked').checked = false;
+            loadClaims();
+        } else {
+            showResult(false, 'Handover NOT recorded', (data.error && data.error.message) || 'Error');
+            $('complete-btn').disabled = false;
+        }
+    });
+
+    // Camera scanning where the browser supports it; USB/Bluetooth scanners type into the field.
+    if ('BarcodeDetector' in window) {
+        $('camera-btn').classList.remove('hidden');
+        $('camera-btn').addEventListener('click', async () => {
+            const video = $('camera');
+            const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+            video.srcObject = stream; video.classList.remove('hidden'); await video.play();
+            const detector = new BarcodeDetector({ formats: ['qr_code'] });
+            const loop = async () => {
+                const codes = await detector.detect(video).catch(() => []);
+                if (codes.length) {
+                    $('token-input').value = codes[0].rawValue;
+                    stream.getTracks().forEach(t => t.stop()); video.classList.add('hidden');
+                    return;
+                }
+                requestAnimationFrame(loop);
+            };
+            loop();
+        });
+    }
+
+    function cell(text, cls) {
+        const td = document.createElement('td');
+        td.className = 'p-3 align-top ' + (cls || '');
+        td.textContent = text == null ? '—' : String(text);
+        return td;
+    }
+    function button(label, cls, onClick) {
+        const b = document.createElement('button');
+        b.type = 'button'; b.textContent = label;
+        b.className = 'h-8 px-3 rounded-md text-xs font-bold uppercase text-white ' + cls;
+        b.addEventListener('click', async () => { b.disabled = true; await onClick(); });
+        return b;
+    }
+    async function loadClaims() {
+        const status = $('claim-filter').value;
+        const { data } = await call('GET', '/staff/claims' + (status ? `?status=${status}` : ''));
+        const rows = data.claims || [];
+        const body = $('claims-body');
+        body.replaceChildren();
+        $('claims-empty').classList.toggle('hidden', rows.length > 0);
+        for (const c of rows) {
+            const tr = document.createElement('tr');
+            tr.className = 'border-t border-slate-100';
+            const passes = c.outcomes.filter(o => o.outcome === 'pass').length;
+            tr.append(cell(c.reportId, 'mono font-bold'), cell(`${c.claimerName} · ${c.claimerPhone} · ${c.pnr}`),
+                      cell(`${c.item.publicDescription || '—'} · ${c.item.qrTagId || '—'}`),
+                      cell(`${passes}/${c.outcomes.length} matched · ${c.roundsUsed} round(s)`), cell(c.status));
+            const actions = document.createElement('td');
+            actions.className = 'p-3 align-top whitespace-nowrap space-x-2';
+            if (c.status === 'staff_review' || c.status === 'locked') {
+                actions.append(button('Approve', 'bg-green-600 hover:bg-green-700', async () => {
+                    let idVerified = false;
+                    if (c.status === 'locked') {
+                        idVerified = window.confirm('Locked claim: have you verified the passenger\'s photo ID in person?');
+                        if (!idVerified) { loadClaims(); return; }
+                    }
+                    const r = await call('POST', `/staff/claims/${c.claimId}/approve`, { idVerified });
+                    flash(r.status === 200 ? 'Approved. Pickup code issued to the passenger.' : r.data.error.message, r.status === 200);
+                    loadClaims();
+                }), button('Reject', 'bg-tn-red hover:bg-red-800', async () => {
+                    const r = await call('POST', `/staff/claims/${c.claimId}/reject`);
+                    flash(r.status === 200 ? 'Claim rejected.' : r.data.error.message, r.status === 200);
+                    loadClaims();
+                }));
+            }
+            if (c.status === 'token_issued') {
+                actions.append(button('Reissue code', 'bg-tn-blue hover:bg-blue-800', async () => {
+                    if (!window.confirm('Reissue only after checking the passenger\'s photo ID. The old code will stop working. Continue?')) { loadClaims(); return; }
+                    const r = await call('POST', `/staff/claims/${c.claimId}/reissue-token`, { idVerified: true });
+                    flash(r.status === 200 ? 'New code issued; the old code is revoked. The passenger sees it after logging in.' : r.data.error.message, r.status === 200);
+                    loadClaims();
+                }));
+            }
+            tr.append(actions);
+            body.append(tr);
+        }
+    }
+    $('claim-filter').addEventListener('change', loadClaims);
+    loadClaims();
+})();
+</script>
+{% endblock %}

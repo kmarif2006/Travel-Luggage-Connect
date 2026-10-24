@@ -58,26 +58,24 @@
 
                 <form action="{{ url_for('submit_lost') }}" method="POST" enctype="multipart/form-data" class="p-8 space-y-6" id="lost-form">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                    <div class="grid md:grid-cols-2 gap-6">
-                        <!-- Name -->
-                        <div class="space-y-1.5">
-                            <label class="block text-sm font-bold text-slate-700">
-                                Your Name / பயணியர் பெயர் <span class="text-tn-red">*</span>
-                            </label>
-                            <input type="text" name="name" required
-                                   class="w-full input-gov font-medium input-focus h-[40px] px-3 border border-slate-300 rounded-md"
-                                   placeholder="Enter full name">
+                    {% set pax = nav_passenger() if nav_passenger is defined else None %}
+                    {% if pax %}
+                    <!-- Reporter identity comes from the OTP-verified session (Feature 1) -->
+                    <div class="p-4 rounded-md bg-blue-50 border border-blue-100 flex items-center justify-between gap-4">
+                        <div>
+                            <p class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Reporting as / பயணி</p>
+                            <p class="font-bold text-slate-800">{{ pax.passenger_name }}</p>
+                            <p class="text-xs mono text-slate-500">PNR {{ pax.pnr }}</p>
                         </div>
-                        <!-- Phone -->
-                        <div class="space-y-1.5">
-                            <label class="block text-sm font-bold text-slate-700">
-                                Phone Number / கைபேசி எண் <span class="text-tn-red">*</span>
-                            </label>
-                            <input type="tel" name="phone" required pattern="[0-9]{10}"
-                                   class="w-full h-[40px] px-3 border border-slate-300 rounded-md font-bold mono input-focus"
-                                   placeholder="10-digit mobile number">
-                        </div>
+                        <a href="{{ url_for('passenger_auth.passenger_home') }}" class="text-xs font-bold text-tn-blue uppercase hover:underline">My reports</a>
                     </div>
+                    {% else %}
+                    <div id="login-required" class="p-4 rounded-md bg-amber-50 border border-amber-200 text-sm text-amber-900">
+                        <p class="font-bold">Please log in with your PNR to report a lost item.</p>
+                        <p class="text-xs mt-1">We verify your booking with a one-time password so that only you can see your report and its matches.</p>
+                        <a href="{{ url_for('passenger_auth.login_page', next='/') }}" class="inline-block mt-3 btn-gov-primary text-xs uppercase tracking-widest">Passenger Login</a>
+                    </div>
+                    {% endif %}
 
                     <!-- Bus Route (searchable over the 500-route SETC catalog) -->
                     <div class="space-y-1.5 relative">
@@ -211,10 +209,17 @@
                     </div>
 
                     <div class="pt-2">
+                        {% if pax %}
                         <button type="submit" id="submit-btn"
                                 class="w-full btn-gov-primary text-sm uppercase tracking-widest shadow-md">
                             Submit Lost Report / அறிக்கையைச் சமர்ப்பிக்கவும்
                         </button>
+                        {% else %}
+                        <a href="{{ url_for('passenger_auth.login_page', next='/') }}"
+                           class="w-full btn-gov-primary text-sm uppercase tracking-widest shadow-md">
+                            Log in to submit / உள்நுழையவும்
+                        </a>
+                        {% endif %}
                     </div>
                 </form>
             </div>

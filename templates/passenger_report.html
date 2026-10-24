@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+
+{% block title %}Report {{ report.tracking_id }} - TN Bus Lost &amp; Found{% endblock %}
+
+{% block content %}
+<div class="max-w-[800px] mx-auto space-y-6">
+    <div class="flex items-center justify-between">
+        <a href="{{ url_for('passenger_auth.passenger_home') }}" class="text-xs font-bold text-slate-500 uppercase hover:text-tn-blue">&larr; My Lost &amp; Found</a>
+        <a href="{{ url_for('match_notify.notifications_page') }}" class="text-xs font-bold text-tn-blue uppercase hover:underline">Notifications</a>
+    </div>
+
+    <div class="card-professional overflow-hidden">
+        <div class="bg-tn-blue p-5 text-white flex items-center justify-between">
+            <div>
+                <p class="text-xs uppercase tracking-widest opacity-80 font-bold">Lost Report</p>
+                <p class="text-xl font-heading font-bold mono">{{ report.tracking_id }}</p>
+            </div>
+            <span id="report-status" class="text-xs font-bold uppercase bg-white/20 px-3 py-1 rounded-full">{{ report.status or 'pending' }}</span>
+        </div>
+        <div class="p-6 grid sm:grid-cols-2 gap-6 text-sm">
+            <div>
+                <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Route</p>
+                <p class="font-bold text-slate-800">{{ report.route_name or '—' }}</p>
+            </div>
+            <div>
+                <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Travel Date</p>
+                <p class="font-bold text-slate-800 mono">{{ report.date or '—' }}</p>
+            </div>
+            <div class="sm:col-span-2">
+                <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Your description</p>
+                <p class="text-slate-700 italic border-l-4 border-slate-200 pl-3">{{ report.description }}</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="card-professional p-6">
+        <h2 class="font-heading font-bold text-slate-800 uppercase tracking-wide mb-4">Matches</h2>
+        {% if matches %}
+        <ul class="space-y-3">
+            {% for m in matches %}
+            <li>
+                <a href="{{ url_for('match_notify.match_page', match_id=m.matchId) }}"
+                   class="block p-4 rounded-md border border-slate-200 hover:border-tn-blue transition-colors">
+                    <div class="flex items-center justify-between gap-3">
+                        <p class="font-bold text-slate-800">"{{ m.itemDescription }}"</p>
+                        <span class="text-[10px] font-bold uppercase px-2 py-0.5 rounded border
+                            {% if m.state == 'active' %}badge-matched{% elif m.state == 'expired' %}badge-pending{% else %}badge-resolved{% endif %}">
+                            {{ m.state | replace('_', ' ') }}
+                        </span>
+                    </div>
+                    <p class="text-xs text-slate-500 mt-1">{{ m.foundAt }} · Found {{ m.dateFound }} · {{ m.confidencePercent }}% match</p>
+                </a>
+            </li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <p id="no-matches" class="text-sm text-slate-500">No matches yet. We will notify you on WhatsApp or email as soon as a depot logs a likely match.</p>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

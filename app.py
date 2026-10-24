@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 import requests
 from flask import (
     Flask, render_template, request,
-    redirect, url_for, session, flash, jsonify
+    redirect, url_for, session, flash, jsonify, g
 )
 from werkzeug.utils import secure_filename
 from flask_wtf.csrf import CSRFProtect
@@ -28,6 +28,10 @@ from similarity import (
 )
 from notifications import notification_service
 import transport_schema as T
+from passenger_auth import init_passenger_auth, require_passenger
+from match_notify import init_match_notify, ACTIVE_STATUSES as MATCH_ACTIVE_STATUSES
+from claims import init_claims, CATEGORIES as ITEM_CATEGORIES, ATTRIBUTES as PRIVATE_ATTRIBUTES
+from claims import encode_private_attributes, new_tag_id
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -78,6 +82,24 @@ def ensure_indexes():
 
 
 ensure_indexes()
+
+# Feature 1: OTP-based passenger authentication (/auth/* API, /passenger pages,
+# and the require_passenger guard used by passenger-facing features).
+init_passenger_auth(app, db)
+
+# Feature 2: automatic match notification. The matcher below calls
+# match_notifier.record_match(); sending runs on a background worker. Staff
+# re-runs reuse the two existing matching directions.
+match_notifier = init_match_notify(
+    app, db,
+    rematch_lost=lambda lost: compute_matches_for_lost(lost),
+    rematch_found=lambda found: compute_and_save_matches(
+        found, depots_collection.find_one({"phone": found.get("depot_phone")}) or {}),
+).service
+
+# Feature 3: secure claims and QR pickup tokens (also makes found-item photos staff-only).
+claims_state = init_claims(app, db)
+claims_service = claims_state.service
 
 # AI Models
 logger.info("Initialising AI models...")
@@ -205,6 +227,64 @@ def _haversine_km(a, b) -> float:
     h = (math.sin((la2 - la1) / 2) ** 2
          + math.cos(la1) * math.cos(la2) * math.sin((lo2 - lo1) / 2) ** 2)
     return 2 * R * math.asin(math.sqrt(h))
+
+
+def _parse_seat(value, capacity=None, upper=80):
+    """
+    Parse a seat number, bounded by the bus capacity when it is known (else a
+    sane upper limit). Returns (seat_int, error_message) — error is None on OK.
+    """
+    try:
+        seat = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None, "Seat number must be a whole number."
+    limit = capacity if capacity else upper
+    if seat < 1 or seat > limit:
+        return None, f"Seat number must be between 1 and {limit}."
+    return seat, None
+
+
+def _parse_travel_date(value):
+    """
+    Parse a YYYY-MM-DD date and reject anything past tomorrow. The forms cap the date
+    client-side, and an unparseable date silently collapses the matching window,
+    so it is validated here too. Returns (date_str, error_message).
+    """
+    try:
+        d = datetime.strptime(str(value).strip(), "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return None, "Please provide a valid date."
+    # One day of slack: the browser caps the picker using the CLIENT's local date,
+    # so a TN (IST) user just past midnight would otherwise be rejected by a
+    # server running on UTC. Anything beyond tomorrow is still refused.
+    if d.date() > (datetime.now() + timedelta(days=1)).date():
+        return None, "The date cannot be in the future."
+    return d.strftime("%Y-%m-%d"), None
+
+
+def depot_serves_route(depot: dict, route: dict) -> bool:
+    """
+    True when a depot may log a found item against this route: either it
+    operates the service, or the route actually calls at the depot's city (an
+    item is handed in wherever the bus reaches).
+
+    Both clauses are needed — an operating depot is not always itself a listed
+    stop on its own route, and a few routes have no staffed depot among their
+    stops at all. Uses the denormalized `stop_cities` when present, otherwise
+    resolves the stop documents.
+    """
+    if not depot or not route:
+        return False
+    if route.get("operating_depot_code") and \
+       route["operating_depot_code"] == depot.get("depot_code"):
+        return True
+    city = (depot.get("city") or depot.get("stop") or "").strip().lower()
+    if not city:
+        return False
+    cities = route.get("stop_cities")
+    if cities is None:
+        cities = [(x.get("city") or "").strip().lower() for x in route_stops(route)]
+    return city in cities
 
 
 def build_seatmap(bus: dict) -> dict:
@@ -341,37 +421,13 @@ def score_lost_found(found_report: dict, lost: dict, depot: dict):
 
 def _save_match(found_report: dict, lost: dict, score: dict) -> bool:
     """
-    Upsert a match (unique on found_id+request_id), advance the lost report to
-    'matched', and send the high-confidence WhatsApp alert AT MOST ONCE — only
-    when a NEW match document is actually inserted (idempotent notifications).
-    Returns True if a new match was created.
+    Persist a qualifying (found, lost) pair through Feature 2, which upserts the
+    match (unique on reportId+itemId), routes it by confidence (auto-notify /
+    staff review / reject) and queues privacy-safe notifications on the
+    background worker. Duplicate triggers are no-ops. Returns True if a new match
+    document was created.
     """
-    result = matches_collection.update_one(
-        {"found_id": found_report["found_id"], "request_id": lost["request_id"]},
-        {"$setOnInsert": {
-            "found_id":    found_report["found_id"],
-            "request_id":  lost["request_id"],
-            "depot_phone": found_report["depot_phone"],
-            "depot_name":  found_report["depot_name"],
-            "score":       score,
-            "status":      "pending",   # pending → resolved
-            "created_at":  datetime.now().isoformat(),
-        }},
-        upsert=True
-    )
-    is_new = result.upserted_id is not None
-
-    # Advance the timeline to step 2 — only for still-pending reports.
-    lost_collection.update_one(
-        {"request_id": lost["request_id"], "status": "pending"},
-        {"$set": {"status": "matched"}}
-    )
-
-    if is_new and score["final"] >= 0.80 and lost.get("phone"):
-        msg = (f"TNSTC Alert: A highly likely match for your lost item was found at "
-               f"{found_report['depot_name']}. Please check the portal with your "
-               f"Tracking ID: {lost['tracking_id']}.")
-        notification_service.send_whatsapp_async(lost["phone"], msg)
+    _, is_new = match_notifier.record_match(found_report, lost, score)
     return is_new
 
 
@@ -431,7 +487,7 @@ def get_matches_for_depot(depot_phone: str) -> list:
     # Fetch only pending matches belonging to this depot
     raw_matches = list(matches_collection.find({
         "depot_phone": depot_phone,
-        "status":      {"$ne": "resolved"}
+        "status":      {"$in": list(MATCH_ACTIVE_STATUSES)}
     }).sort("created_at", -1))
 
     if not raw_matches:
@@ -464,6 +520,7 @@ def get_matches_for_depot(depot_phone: str) -> list:
         enriched_lost = dict(lost)
         enriched_lost["score"]    = match["score"]
         enriched_lost["match_id"] = str(match["_id"])
+        enriched_lost["match_status"] = match.get("status")
 
         if fid not in groups:
             groups[fid] = {
@@ -490,8 +547,14 @@ def index():
 
 
 @app.route('/lost', methods=['POST'])
+@require_passenger(page=True)
 def submit_lost():
-    """Accept a lost luggage report from a passenger."""
+    """
+    Accept a lost luggage report from an OTP-verified passenger (Feature 1).
+    The report is owned by the session's (pnr, phone); name and phone come from
+    the verified session, never from the form.
+    """
+    passenger = g.passenger
     route_id          = request.form.get('route_id')
     trip_id           = request.form.get('trip_id')
     seat_no           = request.form.get('seat_no')
@@ -499,8 +562,8 @@ def submit_lost():
     alighting_stop_id = request.form.get('alighting_stop_id')
     date              = request.form.get('date')
     description       = request.form.get('description')
-    phone             = request.form.get('phone')
-    name              = request.form.get('name')
+    phone             = passenger.phone
+    name              = passenger.passenger_name
     image_file        = request.files.get('image')
 
     if not all([route_id, trip_id, seat_no, boarding_stop_id,
@@ -518,11 +581,34 @@ def submit_lost():
         flash('Invalid boarding or alighting stop for selected route.', 'error')
         return redirect(url_for('index'))
 
-    # Resolve trip → authoritative bus + departure; stop ids → display names.
-    trip           = get_trip(trip_id)
-    bus_id         = trip.get("bus_id") if trip else None
-    departure_time = trip.get("departure_time") if trip else None
-    stops_map      = {s["stop_id"]: s["name"] for s in route_stops(route)}
+    if boarding_stop_id == alighting_stop_id:
+        # The directional luggage filter can never satisfy src == dst, so such a
+        # report would sit unmatchable forever. Reject it up front.
+        flash('Boarding and alighting stops must be different.', 'error')
+        return redirect(url_for('index'))
+
+    date, err = _parse_travel_date(date)
+    if err:
+        flash(err, 'error')
+        return redirect(url_for('index'))
+
+    # The trip must exist AND actually run on the selected route — trip_id is
+    # client-supplied and drives the exact-trip match signal.
+    trip = get_trip(trip_id)
+    if not trip or trip.get("route_id") != route_id:
+        flash('The selected bus/service does not run on that route.', 'error')
+        return redirect(url_for('index'))
+
+    bus            = get_bus(trip.get("bus_id"))
+    bus_id         = trip.get("bus_id")
+    departure_time = trip.get("departure_time")
+
+    seat_no, err = _parse_seat(seat_no, (bus or {}).get("capacity"))
+    if err:
+        flash(err, 'error')
+        return redirect(url_for('index'))
+
+    stops_map = {s["stop_id"]: s["name"] for s in route_stops(route)}
 
     tracking_id = generate_tracking_id()
     request_id  = uuid.uuid4().hex   # Internal unique key for DB relations
@@ -539,7 +625,7 @@ def submit_lost():
         "route_name":        f"{route.get('origin_name')} → {route.get('dest_name')}",
         "trip_id":           trip_id,
         "bus_id":            bus_id,
-        "bus_registration":  (get_bus(bus_id) or {}).get("registration_no") if bus_id else None,
+        "bus_registration":  (bus or {}).get("registration_no"),
         "departure_time":    departure_time,
         "seat_no":           seat_no,
         "boarding_stop_id":  boarding_stop_id,
@@ -551,8 +637,10 @@ def submit_lost():
         "description":       description,
         "phone":             phone,
         "name":              name,
+        "ownerPnr":          passenger.pnr,     # object-level authorization (Feature 2)
+        "ownerPhone":        passenger.phone,
         "image_path":        image_path,
-        "status":            "pending",     # pending | resolved
+        "status":            "pending",     # pending | matched | resolved | cancelled
         "matched_depot":     None,
         "matched_at":        None,
         "created_at":        datetime.now().isoformat()
@@ -561,12 +649,11 @@ def submit_lost():
     lost_collection.insert_one(report)
 
     # Symmetric matching: check against found items already logged on this route.
-    n = compute_matches_for_lost(report)
+    # The count is not shown: review-band matches must stay invisible until approved.
+    compute_matches_for_lost(report)
 
     msg = (f'Report submitted! Your Tracking ID is {tracking_id} — '
-           f'save it to check your claim status.')
-    if n:
-        msg += f' We already found {n} possible match(es); a depot may contact you soon.'
+           f'save it to check your claim status. We will notify you if a depot finds a likely match.')
     flash(msg, 'success')
     session['last_tracking_id'] = tracking_id
     return redirect(url_for('index'))
@@ -660,9 +747,11 @@ def submit_found():
     trip_id         = request.form.get('trip_id') or None
     date            = request.form.get('date')
     notes           = request.form.get('notes')
+    public_description = (request.form.get('public_description') or '').strip()
+    category        = request.form.get('category') or 'other'
     found_seat_area = request.form.get('found_seat_area') or None
 
-    if not all([route_id, date, notes]):
+    if not all([route_id, date, notes, public_description]):
         flash('Please fill in all required fields.', 'error')
         return redirect(url_for('depot_dashboard'))
 
@@ -671,9 +760,33 @@ def submit_found():
         flash('Invalid route selected.', 'error')
         return redirect(url_for('depot_dashboard'))
 
+    if not depot_serves_route(depot, route):
+        flash('This depot does not serve the selected route.', 'error')
+        return redirect(url_for('depot_dashboard'))
+
+    date, err = _parse_travel_date(date)
+    if err:
+        flash(err, 'error')
+        return redirect(url_for('depot_dashboard'))
+
     # Optional trip → carries the bus the item came off, for exact matching.
-    trip   = get_trip(trip_id) if trip_id else None
-    bus_id = trip.get("bus_id") if trip else (request.form.get('bus_id') or None)
+    # When supplied it must actually run on the selected route (it drives the
+    # exact-trip signal). bus_id is derived from the trip only — never read from
+    # the form, which would let a client forge the same-bus score boost.
+    trip = None
+    if trip_id:
+        trip = get_trip(trip_id)
+        if not trip or trip.get("route_id") != route_id:
+            flash('The selected bus/service does not run on that route.', 'error')
+            return redirect(url_for('depot_dashboard'))
+    bus_id = trip.get("bus_id") if trip else None
+
+    if found_seat_area is not None:
+        capacity = (get_bus(bus_id) or {}).get("capacity") if bus_id else None
+        found_seat_area, err = _parse_seat(found_seat_area, capacity)
+        if err:
+            flash(err, 'error')
+            return redirect(url_for('depot_dashboard'))
 
     # Handle optional image upload
     image_path = None
@@ -690,6 +803,14 @@ def submit_found():
 
     found_id = uuid.uuid4().hex   # Unique internal ID for this found report
 
+    # Feature 3: private attributes are hashed right here; the raw answers are never stored.
+    if category not in ITEM_CATEGORIES:
+        category = 'other'
+    private_attributes = encode_private_attributes(
+        {name: request.form.get(f'attr_{name}') for name in PRIVATE_ATTRIBUTES},
+        category, public_description, claims_service.answer_key,
+        claims_state.config.fuzzy_min_token_length)
+
     report = {
         "found_id":        found_id,          # Unique internal ID (used in matches)
         "id":              found_id[:8],      # Short display ID
@@ -703,7 +824,11 @@ def submit_found():
         "departure_time":  trip.get("departure_time") if trip else None,
         "found_seat_area": found_seat_area,
         "date":            date,
-        "notes":           notes,
+        "notes":           notes,             # private: staff only
+        "public_description": public_description[:120],   # the only text passengers see
+        "category":        category,
+        "private_attributes": private_attributes,          # hashed claim-verification answers
+        "qrTagId":         new_tag_id(),                   # printed and stuck on the item
         "image_path":      image_path,
         "ocr_text":        ocr_text,          # cached; reused by the matcher
         "status":          "open",
@@ -711,6 +836,7 @@ def submit_found():
     }
 
     found_collection.insert_one(report)
+    claims_service.record_item_logged(report, depot_phone)
 
     # Run AI matching and SAVE results to matches collection
     n = compute_and_save_matches(report, depot)
@@ -777,6 +903,17 @@ def api_transport_routes():
             {"route_no": rx}, {"origin_name": rx},
             {"dest_name": rx}, {"via": rx},
         ]}
+
+    # depot_only=1 narrows the catalog to routes the logged-in depot may log
+    # found items against, so the picker cannot offer a route that submit_found
+    # would then reject. Mirrors depot_serves_route().
+    if request.args.get('depot_only') == '1' and session.get('depot_phone'):
+        depot = depots_collection.find_one({"phone": session['depot_phone']}) or {}
+        scope = {"$or": [
+            {"operating_depot_code": depot.get("depot_code")},
+            {"stop_cities": (depot.get("city") or depot.get("stop") or "").strip().lower()},
+        ]}
+        query = {"$and": [query, scope]} if query else scope
 
     cursor = routes_collection.find(
         query,
@@ -1010,6 +1147,13 @@ def resolve_match():
         return jsonify({"success": False, "message": "Match not found."}), 404
     if match.get("status") == "resolved":
         return jsonify({"success": False, "message": "Match already resolved."}), 409
+    if match.get("status") not in MATCH_ACTIVE_STATUSES:
+        return jsonify({"success": False,
+                        "message": f"Match is {match.get('status')} and can no longer be resolved."}), 409
+    item = found_collection.find_one({"found_id": match["found_id"]}) or {}
+    if item.get("status") not in (None, "open"):
+        return jsonify({"success": False,
+                        "message": "This item is reserved by a passenger claim; use the claims desk."}), 409
 
     request_id = match["request_id"]   # trusted: comes from the match document
 
@@ -1034,11 +1178,10 @@ def resolve_match():
         }}
     )
 
-    # Step 3: Cancel all other pending matches for this passenger
-    matches_collection.update_many(
-        {"request_id": request_id, "status": "pending"},
-        {"$set": {"status": "cancelled"}}
-    )
+    # Step 3: The item is now reserved for this report — end every competing match
+    # (other reports on this item, other items on this report) and their queued
+    # notifications.
+    match_notifier.on_match_resolved(oid)
     # Step 4: Send WhatsApp notification to the passenger
     lost_report = lost_collection.find_one({"request_id": request_id})
     if lost_report and lost_report.get("phone"):

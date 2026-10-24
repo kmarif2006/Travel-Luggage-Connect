@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+
+{% block title %}Notifications - TN Bus Lost &amp; Found{% endblock %}
+
+{% block content %}
+<div class="max-w-[700px] mx-auto space-y-6">
+    <a href="{{ url_for('passenger_auth.passenger_home') }}" class="text-xs font-bold text-slate-500 uppercase hover:text-tn-blue">&larr; My Lost &amp; Found</a>
+    <h1 class="text-2xl font-heading font-bold text-slate-800 uppercase tracking-wide">Notifications</h1>
+    {% if notifications %}
+    <ul class="space-y-3">
+        {% for n in notifications %}
+        <li>
+            <a href="{{ n.link }}" class="block card-professional p-4 hover:border-tn-blue transition-colors">
+                <p class="font-bold text-slate-800">{{ n.title }}</p>
+                <p class="text-xs text-slate-500 mt-1">{{ n.createdAtIst }}</p>
+            </a>
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p id="no-notifications" class="text-sm text-slate-500">No notifications yet.</p>
+    {% endif %}
+</div>
+{% endblock %}

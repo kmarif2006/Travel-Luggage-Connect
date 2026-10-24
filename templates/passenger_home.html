@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+
+{% block title %}My Lost &amp; Found - TN Bus Lost &amp; Found{% endblock %}
+
+{% block content %}
+<div class="max-w-[800px] mx-auto space-y-8">
+
+    <div class="text-center space-y-2">
+        <h1 class="text-3xl font-heading font-bold text-slate-800 uppercase tracking-wide">My Lost &amp; Found</h1>
+        <p class="font-tamil text-sm text-tn-gold font-bold">என் தொலைந்த பொருட்கள்</p>
+    </div>
+
+    <div class="card-professional overflow-hidden">
+        <div class="bg-tn-blue p-5 text-white flex items-center justify-between">
+            <div>
+                <p class="text-xs uppercase tracking-widest opacity-80 font-bold">Verified Passenger</p>
+                <p id="passenger-name" class="text-xl font-heading font-bold">{{ passenger.passenger_name }}</p>
+            </div>
+            <div class="mono font-bold text-sm bg-white/20 px-4 py-2 rounded-full tracking-widest">{{ passenger.pnr }}</div>
+        </div>
+        <div class="p-6 grid sm:grid-cols-2 gap-6">
+            <div>
+                <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Registered Mobile</p>
+                <p class="font-bold text-slate-800 text-sm mono">{{ masked_phone }}</p>
+            </div>
+            <div>
+                <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Travel Date</p>
+                <p class="font-bold text-slate-800 text-sm mono">{{ booking.travel_date }}</p>
+            </div>
+            <div class="sm:col-span-2">
+                <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Route</p>
+                <p class="font-bold text-slate-800 text-sm">{{ booking.route }}</p>
+            </div>
+            <div class="sm:col-span-2">
+                <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Session</p>
+                <p class="text-slate-700 text-sm">
+                    Expires at <span class="font-bold">{{ session_expires_ist }}</span>
+                    (<span id="session-countdown" class="mono"></span> left)
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <div id="my-reports" class="card-professional p-6 hidden">
+        <div class="flex items-center justify-between mb-4">
+            <h2 class="font-heading font-bold text-slate-800 uppercase tracking-wide">My reports</h2>
+            <a href="/passenger/notifications" class="text-xs font-bold text-tn-blue uppercase hover:underline">Notifications</a>
+        </div>
+        <ul id="my-reports-list" class="space-y-2"></ul>
+        <p id="my-reports-empty" class="hidden text-sm text-slate-500">You have not filed a lost report yet.</p>
+    </div>
+
+    <div class="grid sm:grid-cols-2 gap-4">
+        <a href="{{ url_for('index') }}" class="card-professional p-6 hover:border-tn-blue transition-colors">
+            <p class="font-heading font-bold text-slate-800 uppercase">Report a lost item</p>
+            <p class="text-xs text-slate-500 mt-1">File a report with your route, bus and seat.</p>
+        </a>
+        <a href="{{ url_for('status_page') }}" class="card-professional p-6 hover:border-tn-blue transition-colors">
+            <p class="font-heading font-bold text-slate-800 uppercase">Track a claim</p>
+            <p class="text-xs text-slate-500 mt-1">Check progress with your Tracking ID.</p>
+        </a>
+    </div>
+
+    <div class="flex justify-center">
+        <button id="logout-btn" type="button" class="btn-gov-secondary text-xs uppercase tracking-widest">Log out</button>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(() => {
+    const LOGIN_EXPIRED = {{ (url_for('passenger_auth.login_page') ~ '?reason=expired') | tojson }};
+    const LOGIN_OUT = {{ (url_for('passenger_auth.login_page') ~ '?reason=logged_out') | tojson }};
+    const CSRF = document.querySelector('meta[name="csrf-token"]').content;
+    const end = performance.now() + {{ session_expires_in | int }} * 1000;
+    const el = document.getElementById('session-countdown');
+
+    function fmt(sec) {
+        sec = Math.max(0, Math.ceil(sec));
+        return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+    }
+    const timer = setInterval(() => {
+        const left = (end - performance.now()) / 1000;
+        if (left <= 0) { clearInterval(timer); window.location.assign(LOGIN_EXPIRED); return; }
+        el.textContent = fmt(left);
+    }, 500);
+    el.textContent = fmt((end - performance.now()) / 1000);
+
+    // Re-check the server session periodically (logout elsewhere, cancellation).
+    setInterval(async () => {
+        try {
+            const resp = await fetch('/auth/me', { credentials: 'same-origin' });
+            if (resp.status === 401 || resp.status === 403) window.location.assign(LOGIN_EXPIRED);
+        } catch (e) { /* offline: the local countdown still enforces expiry */ }
+    }, 60000);
+
+    // My reports (Feature 2). Values are untrusted: rendered with textContent only.
+    (async () => {
+        try {
+            const resp = await fetch('/reports', { credentials: 'same-origin' });
+            if (!resp.ok) return;
+            const data = await resp.json();
+            const list = document.getElementById('my-reports-list');
+            for (const r of data.reports) {
+                const li = document.createElement('li');
+                const a = document.createElement('a');
+                a.href = '/passenger/reports/' + encodeURIComponent(r.trackingId);
+                a.className = 'flex items-center justify-between p-3 rounded-md border border-slate-200 hover:border-tn-blue';
+                const left = document.createElement('span');
+                left.className = 'mono font-bold text-slate-800';
+                left.textContent = r.trackingId;
+                const right = document.createElement('span');
+                right.className = 'text-[10px] font-bold uppercase text-slate-500';
+                right.textContent = r.status;
+                a.append(left, right);
+                li.append(a);
+                list.append(li);
+            }
+            document.getElementById('my-reports-empty').classList.toggle('hidden', data.reports.length > 0);
+            document.getElementById('my-reports').classList.remove('hidden');
+        } catch (e) { /* the rest of the page works without the list */ }
+    })();
+
+    document.getElementById('logout-btn').addEventListener('click', async () => {
+        try {
+            await fetch('/auth/logout', { method: 'POST', credentials: 'same-origin',
+                                          headers: { 'X-CSRFToken': CSRF } });
+        } finally {
+            window.location.assign(LOGIN_OUT);
+        }
+    });
+})();
+</script>
+{% endblock %}

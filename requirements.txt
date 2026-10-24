@@ -11,3 +11,4 @@ python-dotenv
 requests
 twilio
 groq
+segno

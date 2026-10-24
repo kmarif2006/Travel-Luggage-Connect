@@ -557,6 +557,16 @@ def main():
         routes.append(doc)
         route_services[doc["route_id"]] = 1
 
+    # Denormalized lowercase stop cities per route. Lets depot_serves_route()
+    # and the depot_only route filter answer "does this route call at the depot's
+    # city?" with one indexable query instead of resolving every stop document.
+    city_by_stop_id = {s["stop_id"]: (s.get("city") or "").strip().lower()
+                       for s in stops}
+    for rt in routes:
+        rt["stop_cities"] = sorted(
+            {city_by_stop_id.get(sid, "") for sid in rt["stop_sequence"]} - {""}
+        )
+
     # ── Buses: distribute 500 across depots weighted by routes operated ──────
     routes_by_depot = defaultdict(list)
     for rt in routes:

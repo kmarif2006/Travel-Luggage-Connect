@@ -1,0 +1,255 @@
+{% extends "base.html" %}
+
+{% block title %}Passenger Login / பயணி உள்நுழைவு - TN Bus Lost &amp; Found{% endblock %}
+
+{% block content %}
+<div class="max-w-[1200px] mx-auto py-8 flex items-center justify-center">
+    <div class="w-full max-w-[500px] space-y-6">
+
+        {% if reason == 'expired' %}
+        <div id="session-expired-banner" class="p-4 rounded-md text-sm font-semibold bg-amber-50 text-amber-800 border border-amber-200">
+            Your session has expired. Please log in again to continue.
+        </div>
+        {% elif reason == 'ineligible' %}
+        <div class="p-4 rounded-md text-sm font-semibold bg-red-50 text-tn-red border border-red-200">
+            This booking is no longer eligible for Lost &amp; Found access.
+        </div>
+        {% elif reason == 'logged_out' %}
+        <div class="p-4 rounded-md text-sm font-semibold bg-green-50 text-green-700 border border-green-200">
+            You have been logged out.
+        </div>
+        {% endif %}
+
+        <div class="card-professional overflow-hidden shadow-lg border-t-4 border-tn-blue">
+            <div class="p-8 text-center bg-slate-50 border-b border-slate-100">
+                <h2 class="text-2xl font-heading font-bold text-slate-800 uppercase tracking-wide">Passenger Login</h2>
+                <p class="font-tamil text-slate-500 font-bold text-sm mt-1">பயணி உள்நுழைவு</p>
+                <p class="text-xs text-slate-500 mt-3">We verify you with a one-time password sent to the mobile number registered on your booking.</p>
+            </div>
+
+            <!-- Step 1: PNR + phone -->
+            <form id="step-details" class="p-8 space-y-6" novalidate>
+                <div class="space-y-1.5">
+                    <label for="pnr" class="block text-sm font-bold text-slate-700">
+                        PNR Number / பி.என்.ஆர் எண் <span class="text-tn-red">*</span>
+                    </label>
+                    <input id="pnr" name="pnr" type="text" required maxlength="13" autocomplete="off" spellcheck="false"
+                           class="w-full h-[44px] px-3 border border-slate-300 rounded-md font-bold mono uppercase tracking-widest input-focus"
+                           placeholder="e.g. T26100101">
+                </div>
+                <div class="space-y-1.5">
+                    <label for="phone" class="block text-sm font-bold text-slate-700">
+                        Registered Mobile / கைபேசி எண் <span class="text-tn-red">*</span>
+                    </label>
+                    <input id="phone" name="phone" type="tel" required maxlength="20" autocomplete="tel"
+                           class="w-full h-[44px] px-3 border border-slate-300 rounded-md font-bold mono input-focus"
+                           placeholder="98765 43210">
+                    <p class="text-[11px] text-slate-400">The OTP is sent only to the mobile number on the booking.</p>
+                </div>
+                <div id="details-error" role="alert" class="hidden p-3 rounded-md text-sm font-semibold bg-red-50 text-tn-red border border-red-200"></div>
+                <button id="send-otp-btn" type="submit" class="w-full btn-gov-primary text-sm uppercase tracking-widest shadow-md disabled:opacity-60">
+                    Send OTP / OTP அனுப்பு
+                </button>
+            </form>
+
+            <!-- Step 2: OTP -->
+            <form id="step-otp" class="hidden p-8 space-y-6" novalidate>
+                <div id="otp-sent-info" class="p-3 rounded-md text-xs font-semibold bg-blue-50 text-tn-blue border border-blue-100"></div>
+                <div class="space-y-1.5">
+                    <label for="otp" class="block text-sm font-bold text-slate-700">
+                        Enter 6-digit OTP / OTP உள்ளிடவும் <span class="text-tn-red">*</span>
+                    </label>
+                    <input id="otp" name="otp" type="text" inputmode="numeric" pattern="[0-9]{6}" maxlength="6"
+                           autocomplete="one-time-code" required
+                           class="w-full h-[52px] px-3 border border-slate-300 rounded-md font-bold mono text-2xl text-center tracking-[0.5em] input-focus"
+                           placeholder="••••••">
+                    <div class="flex items-center justify-between text-xs font-semibold">
+                        <span id="otp-countdown" class="text-slate-500" aria-live="polite"></span>
+                        <button id="resend-btn" type="button" class="text-tn-blue hover:underline disabled:text-slate-400 disabled:no-underline" disabled>Resend OTP</button>
+                    </div>
+                </div>
+                <div id="otp-error" role="alert" class="hidden p-3 rounded-md text-sm font-semibold bg-red-50 text-tn-red border border-red-200"></div>
+                <div id="lockout-box" role="alert" class="hidden p-4 rounded-md text-sm font-semibold bg-red-50 text-tn-red border border-red-300">
+                    Too many incorrect attempts. Verification is locked.
+                    <span class="block mt-1">Try again in <span id="lockout-remaining" class="mono"></span>.</span>
+                </div>
+                <button id="verify-btn" type="submit" class="w-full btn-gov-primary text-sm uppercase tracking-widest shadow-md disabled:opacity-60">
+                    Verify &amp; Continue / சரிபார்
+                </button>
+                <button id="change-details-btn" type="button" class="w-full text-xs text-slate-500 hover:text-tn-blue font-bold uppercase tracking-wide">
+                    Change PNR / mobile number
+                </button>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(() => {
+    const NEXT_URL = {{ next_url | tojson }};
+    const CSRF = document.querySelector('meta[name="csrf-token"]').content;
+    const $ = id => document.getElementById(id);
+    const state = { pnr: '', phone: '', otpTimer: null, resendTimer: null, lockTimer: null };
+
+    function fmt(sec) {
+        sec = Math.max(0, Math.ceil(sec));
+        const m = Math.floor(sec / 60), s = sec % 60;
+        return `${m}:${String(s).padStart(2, '0')}`;
+    }
+    function showError(id, msg) { const el = $(id); el.textContent = msg; el.classList.remove('hidden'); }
+    function hideError(id) { $(id).classList.add('hidden'); }
+
+    // Countdowns run from the server's relative "seconds remaining" against the
+    // browser's monotonic clock, so a skewed device clock cannot distort them.
+    function countdown(seconds, onTick, onDone) {
+        const end = performance.now() + seconds * 1000;
+        const tick = () => {
+            const left = (end - performance.now()) / 1000;
+            if (left <= 0) { clearInterval(timer); onDone(); return; }
+            onTick(left);
+        };
+        const timer = setInterval(tick, 250);
+        tick();
+        return timer;
+    }
+
+    async function postJSON(url, body) {
+        const resp = await fetch(url, {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF },
+            body: JSON.stringify(body),
+        });
+        let data = {};
+        try { data = await resp.json(); } catch (e) { data = {}; }
+        return { status: resp.status, data };
+    }
+
+    function errorMessage(data, fallback) {
+        return (data && data.error && data.error.message) || fallback;
+    }
+
+    function startOtpTimer(seconds) {
+        clearInterval(state.otpTimer);
+        $('verify-btn').disabled = false;
+        state.otpTimer = countdown(seconds,
+            left => { $('otp-countdown').textContent = `OTP valid for ${fmt(left)}`; },
+            () => {
+                $('otp-countdown').textContent = 'OTP expired. Please request a new one.';
+                $('verify-btn').disabled = true;
+            });
+    }
+
+    function startResendTimer(seconds) {
+        clearInterval(state.resendTimer);
+        const btn = $('resend-btn');
+        btn.disabled = true;
+        state.resendTimer = countdown(seconds,
+            left => { btn.textContent = `Resend OTP in ${Math.ceil(left)}s`; },
+            () => { btn.disabled = false; btn.textContent = 'Resend OTP'; });
+    }
+
+    function showLockout(seconds) {
+        clearInterval(state.lockTimer);
+        clearInterval(state.otpTimer);
+        $('lockout-box').classList.remove('hidden');
+        $('verify-btn').disabled = true;
+        $('resend-btn').disabled = true;
+        $('otp-countdown').textContent = '';
+        state.lockTimer = countdown(seconds,
+            left => { $('lockout-remaining').textContent = fmt(left); },
+            () => {
+                $('lockout-box').classList.add('hidden');
+                $('resend-btn').disabled = false;
+                $('resend-btn').textContent = 'Request a new OTP';
+            });
+    }
+
+    function goToOtpStep(data) {
+        $('step-details').classList.add('hidden');
+        $('step-otp').classList.remove('hidden');
+        $('lockout-box').classList.add('hidden');
+        hideError('otp-error');
+        $('otp-sent-info').textContent = data.message + (data.maskedPhone ? ` (${data.maskedPhone})` : '');
+        $('otp').value = '';
+        $('otp').focus();
+        startOtpTimer(data.expiresInSeconds);
+        startResendTimer(data.resendAfterSeconds);
+    }
+
+    async function requestOtp(isResend) {
+        const btn = isResend ? $('resend-btn') : $('send-otp-btn');
+        const errBox = isResend ? 'otp-error' : 'details-error';
+        hideError(errBox);
+        btn.disabled = true;
+        try {
+            const { status, data } = await postJSON('/auth/otp/request', { pnr: state.pnr, phone: state.phone });
+            if (status === 202) { goToOtpStep(data); return; }
+            if (status === 423) {
+                if (!isResend) { $('step-details').classList.add('hidden'); $('step-otp').classList.remove('hidden'); }
+                showLockout(data.error.retryAfterSeconds);
+                return;
+            }
+            if (status === 429 && data.error && data.error.code === 'resend_cooldown') {
+                showError(errBox, `Please wait ${data.error.retryAfterSeconds}s before requesting another OTP.`);
+                if (isResend) startResendTimer(data.error.retryAfterSeconds);
+                else btn.disabled = false;
+                return;
+            }
+            showError(errBox, errorMessage(data, 'Could not send the OTP. Please try again.'));
+            btn.disabled = false;
+        } catch (e) {
+            showError(errBox, 'Network error. Please check your connection and try again.');
+            btn.disabled = false;
+        }
+    }
+
+    $('step-details').addEventListener('submit', e => {
+        e.preventDefault();
+        state.pnr = $('pnr').value.trim().toUpperCase();
+        state.phone = $('phone').value.trim();
+        if (!/^[A-Z]{1,3}[0-9]{6,10}$/.test(state.pnr)) {
+            showError('details-error', 'Please enter a valid PNR (e.g. T26100101).'); return;
+        }
+        if (!/^[0-9+\-\s().]{10,20}$/.test(state.phone)) {
+            showError('details-error', 'Please enter a valid 10-digit mobile number.'); return;
+        }
+        requestOtp(false);
+    });
+
+    $('resend-btn').addEventListener('click', () => requestOtp(true));
+
+    $('change-details-btn').addEventListener('click', () => {
+        [state.otpTimer, state.resendTimer, state.lockTimer].forEach(clearInterval);
+        $('step-otp').classList.add('hidden');
+        $('step-details').classList.remove('hidden');
+        $('send-otp-btn').disabled = false;
+        hideError('details-error');
+    });
+
+    $('step-otp').addEventListener('submit', async e => {
+        e.preventDefault();
+        hideError('otp-error');
+        const otp = $('otp').value.trim();
+        if (!/^[0-9]{6}$/.test(otp)) { showError('otp-error', 'The OTP must be exactly 6 digits.'); return; }
+        $('verify-btn').disabled = true;
+        try {
+            const url = '/auth/otp/verify?next=' + encodeURIComponent(NEXT_URL);
+            const { status, data } = await postJSON(url, { pnr: state.pnr, phone: state.phone, otp });
+            if (status === 200) { window.location.assign(data.redirect || NEXT_URL); return; }
+            if (status === 423) { showLockout(data.error.retryAfterSeconds); return; }
+            let msg = errorMessage(data, 'Verification failed. Please try again.');
+            if (data.error && data.error.attemptsRemaining !== undefined) {
+                msg += ` ${data.error.attemptsRemaining} attempt(s) remaining.`;
+            }
+            showError('otp-error', msg);
+            $('verify-btn').disabled = data.error && data.error.code === 'otp_expired';
+        } catch (e2) {
+            showError('otp-error', 'Network error. Please check your connection and try again.');
+            $('verify-btn').disabled = false;
+        }
+    });
+})();
+</script>
+{% endblock %}

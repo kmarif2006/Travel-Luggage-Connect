@@ -118,6 +118,7 @@ VALIDATORS = {
             "type":              _STR,
             "operating_depot_id": _STRN,
             "stop_sequence":     _ARR,
+            "stop_cities":       _ARR,
         },
     ),
     TRIPS: _obj(
